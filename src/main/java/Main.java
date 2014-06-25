@@ -1,6 +1,10 @@
 import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.util.Arrays;
 
+import com.beust.jcommander.JCommander;
 import com.netflix.astyanax.AstyanaxContext;
 import com.netflix.astyanax.Keyspace;
 import com.netflix.astyanax.connectionpool.NodeDiscoveryType;
@@ -16,16 +20,25 @@ import com.netflix.astyanax.thrift.ThriftFamilyFactory;
 public class Main {
 
 	public static void main(String[] args) throws Exception {
+
+		CliOptions options = new CliOptions();
+		JCommander jComm = new JCommander(options, args);
+
+		if (options.help) {
+			jComm.usage();
+			System.exit(0);
+		}
+
 		AstyanaxContext<Keyspace> context = new AstyanaxContext.Builder()
-				.forCluster("Test Cluster")
-				.forKeyspace("testing")
+				.forCluster(options.custerName)
+				.forKeyspace(options.keyspaceName)
 				.withAstyanaxConfiguration(
 						new AstyanaxConfigurationImpl()
 								.setDiscoveryType(NodeDiscoveryType.RING_DESCRIBE))
 				.withConnectionPoolConfiguration(
 						new ConnectionPoolConfigurationImpl("MyConnectionPool")
 								.setPort(9160).setMaxConnsPerHost(1)
-								.setSeeds("127.0.0.1:9160"))
+								.setSeeds(options.seeds))
 				.withConnectionPoolMonitor(new CountingConnectionPoolMonitor())
 				.buildKeyspace(ThriftFamilyFactory.getInstance());
 
@@ -33,22 +46,40 @@ public class Main {
 		Keyspace keyspace = context.getClient();
 
 		ChunkedStorageProvider provider = new CassandraChunkedStorageProvider(
-				keyspace, "storage");
+				keyspace, options.columnFamily);
 
-		byte[] bytes = new byte[1_000_000];
-		byte A = 'A';
-		Arrays.fill(bytes, A);
+		InputStream inputStream = null;
 
+		if (options.file != null) {
+			System.out.println(String.format("Upload file %s", options.file));
+			File fileToUpload = new File(options.file);
+			inputStream = new FileInputStream(fileToUpload);
+			options.fileName = options.file;
+			options.size = (int) fileToUpload.length();
+		} else {
+			System.out.println(String.format("Upload random bytes (%d)",
+					options.size));
+			byte[] bytes = new byte[options.size];
+			byte A = 'A';
+			Arrays.fill(bytes, A);
+			inputStream = new ByteArrayInputStream(bytes);
+		}
+
+		System.out.println(String.format(
+				"Uploading file %s, size=%d, chunk_size=%d, threads=%d",
+				options.fileName, options.size, options.chunkSize,
+				options.concurrency));
+
+		long now = System.currentTimeMillis();
 		ObjectMetadata meta = ChunkedStorage
-				.newWriter(provider, "foobar", new ByteArrayInputStream(bytes))
-				.withChunkSize(0x1000) // Optional chunk size to override
-										// the default for this provider
-				.withConcurrencyLevel(8) // Optional. Upload chunks in 8 threads
-				.withTtl(60) // Optional TTL for the entire object
-				.call();
+				.newWriter(provider, options.fileName, inputStream)
+				.withChunkSize(options.chunkSize)
+				.withConcurrencyLevel(options.concurrency).call();
+		long duration = System.currentTimeMillis() - now;
 
-		System.out.println(meta.getChunkCount());
-		System.out.println(meta.getChunkSize());
+		System.out.println(String.format(
+				"Succesfully uploaded %s, num_chunks=%d, duration=%sms",
+				options.fileName, meta.getChunkCount(), duration));
 
 	}
 }
